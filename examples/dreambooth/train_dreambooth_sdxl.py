@@ -501,36 +501,62 @@ class DreamBoothDataset(Dataset):
 
     def __getitem__(self, index):
         example = {}
-        instance_image = Image.open(self.instance_images_path[index % self.num_instance_images])
-        instance_image = exif_transpose(instance_image)
+        instance_path, instance_prompt = self.instance_images_path[index % self.num_instance_images]
 
+        if self.read_prompts_from_txts:
+            with open(str(instance_path) + ".txt") as f:
+                instance_prompt = f.read().strip()
+
+        instance_image = Image.open(instance_path)
         if not instance_image.mode == "RGB":
             instance_image = instance_image.convert("RGB")
+
         example["instance_images"] = self.image_transforms(instance_image)
+        example["instance_prompt_ids"] = self.tokenizer(
+            instance_prompt,
+            padding="max_length" if self.pad_tokens else "do_not_pad",
+            truncation=True,
+            max_length=self.tokenizer.model_max_length,
+        ).input_ids
 
-        if self.class_data_root:
-            class_image = Image.open(self.class_images_path[index % self.num_class_images])
-            class_image = exif_transpose(class_image)
-
+        if self.with_prior_preservation:
+            class_path, class_prompt = self.class_images_path[index % self.num_class_images]
+            class_image = Image.open(class_path)
             if not class_image.mode == "RGB":
                 class_image = class_image.convert("RGB")
             example["class_images"] = self.image_transforms(class_image)
-
+            example["class_prompt_ids"] = self.tokenizer(
+                class_prompt,
+                padding="max_length" if self.pad_tokens else "do_not_pad",
+                truncation=True,
+                max_length=self.tokenizer.model_max_length,
+            ).input_ids
         return example
 
 
-def collate_fn(examples, with_prior_preservation=False):
+def collate_fn(examples, tokenizer, with_prior_preservation=False):
+    input_ids = [example["instance_prompt_ids"] for example in examples]
     pixel_values = [example["instance_images"] for example in examples]
 
     # Concat class and instance examples for prior preservation.
     # We do this to avoid doing two forward passes.
     if with_prior_preservation:
+        input_ids += [example["class_prompt_ids"] for example in examples]
         pixel_values += [example["class_images"] for example in examples]
 
     pixel_values = torch.stack(pixel_values)
     pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
 
-    batch = {"pixel_values": pixel_values}
+    input_ids = tokenizer.pad(
+        {"input_ids": input_ids},
+        padding=True,
+        return_tensors="pt",
+    ).input_ids
+
+    batch = {
+        "input_ids": input_ids,
+        "pixel_values": pixel_values,
+    }
     return batch
 
 
@@ -1011,21 +1037,23 @@ def main(args):
         if args.with_prior_preservation:
             prompt_embeds = torch.cat([prompt_embeds, class_prompt_hidden_states], dim=0)
             unet_add_text_embeds = torch.cat([unet_add_text_embeds, class_pooled_prompt_embeds], dim=0)
-    else:
-        tokens_one = tokenize_prompt(tokenizer_one, args.instance_prompt)
-        tokens_two = tokenize_prompt(tokenizer_two, args.instance_prompt)
-        if args.with_prior_preservation:
-            class_tokens_one = tokenize_prompt(tokenizer_one, args.class_prompt)
-            class_tokens_two = tokenize_prompt(tokenizer_two, args.class_prompt)
-            tokens_one = torch.cat([tokens_one, class_tokens_one], dim=0)
-            tokens_two = torch.cat([tokens_two, class_tokens_two], dim=0)
+    # else:
+    #     tokens_one = tokenize_prompt(tokenizer_one, args.instance_prompt)
+    #     tokens_two = tokenize_prompt(tokenizer_two, args.instance_prompt)
+    #     if args.with_prior_preservation:
+    #         class_tokens_one = tokenize_prompt(tokenizer_one, args.class_prompt)
+    #         class_tokens_two = tokenize_prompt(tokenizer_two, args.class_prompt)
+    #         tokens_one = torch.cat([tokens_one, class_tokens_one], dim=0)
+    #         tokens_two = torch.cat([tokens_two, class_tokens_two], dim=0)
 
     # Dataset and DataLoaders creation:
     train_dataset = DreamBoothDataset(
+        tokenizer=tokenizer_one,
         concepts_list=args.concepts_list,        
         instance_data_root=args.instance_data_dir,
+        with_prior_preservation=args.with_prior_preservation,
         class_data_root=args.class_data_dir if args.with_prior_preservation else None,
-        class_num=args.num_class_images,
+        num_class_images=args.num_class_images,
         size=args.resolution,
         center_crop=args.center_crop,
     )
@@ -1034,7 +1062,7 @@ def main(args):
         train_dataset,
         batch_size=args.train_batch_size,
         shuffle=True,
-        collate_fn=lambda examples: collate_fn(examples, args.with_prior_preservation),
+        collate_fn=lambda examples: collate_fn(examples, tokenizer_one, args.with_prior_preservation),
         num_workers=args.dataloader_num_workers,
     )
 
@@ -1212,6 +1240,7 @@ def main(args):
                         "time_ids": add_time_ids.repeat(elems_to_repeat, 1),
                         "text_embeds": unet_add_text_embeds.repeat(elems_to_repeat, 1),
                     }
+                    
                     prompt_embeds_input = prompt_embeds.repeat(elems_to_repeat, 1, 1)
                     model_pred = unet(
                         noisy_model_input,
@@ -1220,17 +1249,22 @@ def main(args):
                         added_cond_kwargs=unet_added_conditions,
                     ).sample
                 else:
-                    unet_added_conditions = {"time_ids": add_time_ids.repeat(elems_to_repeat, 1)}
+                    unet_added_conditions = {
+                        "time_ids": add_time_ids.repeat(elems_to_repeat, 1)}
                     prompt_embeds, pooled_prompt_embeds = encode_prompt(
                         text_encoders=[text_encoder_one, text_encoder_two],
                         tokenizers=None,
                         prompt=None,
-                        text_input_ids_list=[tokens_one, tokens_two],
+                        text_input_ids_list=[batch[0][1], batch[0][1]],
                     )
                     unet_added_conditions.update({"text_embeds": pooled_prompt_embeds.repeat(elems_to_repeat, 1)})
+                    
                     prompt_embeds_input = prompt_embeds.repeat(elems_to_repeat, 1, 1)
                     model_pred = unet(
-                        noisy_model_input, timesteps, prompt_embeds_input, added_cond_kwargs=unet_added_conditions
+                        noisy_model_input, 
+                        timesteps, 
+                        prompt_embeds_input, 
+                        added_cond_kwargs=unet_added_conditions
                     ).sample
 
                 # Get the target for loss depending on the prediction type
