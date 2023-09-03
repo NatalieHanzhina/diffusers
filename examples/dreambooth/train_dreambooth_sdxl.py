@@ -175,6 +175,7 @@ def parse_args(input_args=None):
         default=None,
         help="The prompt used to generate sample outputs to save.",
     )    
+
     parser.add_argument(
         "--validation_prompt",
         type=str,
@@ -417,7 +418,12 @@ def parse_args(input_args=None):
     )
     parser.add_argument("--save_interval", type=int, default=10_000, help="Save weights every N steps.")
     parser.add_argument("--save_min_steps", type=int, default=0, help="Start saving weights after N steps.")
-
+    parser.add_argument(
+        "--save_infer_steps",
+        type=int,
+        default=20,
+        help="The number of inference steps for save sample.",
+    )
     parser.add_argument(
         "--concepts_list",
         type=str,
