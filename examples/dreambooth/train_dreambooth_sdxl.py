@@ -42,7 +42,7 @@ from PIL.ImageOps import exif_transpose
 from torch.utils.data import Dataset
 from torchvision import transforms
 from tqdm.auto import tqdm
-from transformers import AutoTokenizer, PretrainedConfig
+from transformers import AutoTokenizer, PretrainedConfig, CLIPTextModel
 
 import diffusers
 from diffusers import (
@@ -169,6 +169,12 @@ def parse_args(input_args=None):
         default=None,
         help="The prompt to specify images in the same class as provided instance images.",
     )
+    parser.add_argument(
+        "--save_sample_prompt",
+        type=str,
+        default=None,
+        help="The prompt used to generate sample outputs to save.",
+    )    
     parser.add_argument(
         "--validation_prompt",
         type=str,
@@ -409,6 +415,9 @@ def parse_args(input_args=None):
         default=4,
         help=("The dimension of the LoRA update matrices."),
     )
+    parser.add_argument("--save_interval", type=int, default=10_000, help="Save weights every N steps.")
+    parser.add_argument("--save_min_steps", type=int, default=0, help="Start saving weights after N steps.")
+
     parser.add_argument(
         "--concepts_list",
         type=str,
@@ -604,6 +613,18 @@ def unet_attn_processors_state_dict(unet) -> Dict[str, torch.tensor]:
 
     return attn_processors_state_dict
 
+class AverageMeter:
+    def __init__(self, name=None):
+        self.name = name
+        self.reset()
+
+    def reset(self):
+        self.sum = self.count = self.avg = 0
+
+    def update(self, val, n=1):
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
 
 def main(args):
     logging_dir = Path(args.output_dir, args.logging_dir)
@@ -1067,6 +1088,54 @@ def main(args):
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
     global_step = 0
     first_epoch = 0
+    def save_weights(step):
+        # Create the pipeline using using the trained modules and save it.
+        if accelerator.is_main_process:
+            if args.train_text_encoder:
+                text_enc_model = accelerator.unwrap_model(text_encoder, keep_fp32_wrapper=True)
+            else:
+                text_enc_model = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision)
+            pipeline = StableDiffusionXLPipeline.from_pretrained(
+                args.pretrained_model_name_or_path,
+                unet=accelerator.unwrap_model(unet, keep_fp32_wrapper=True),
+                text_encoder=text_enc_model,
+                vae=AutoencoderKL.from_pretrained(
+                    args.pretrained_vae_name_or_path or args.pretrained_model_name_or_path,
+                    subfolder=None if args.pretrained_vae_name_or_path else "vae",
+                    revision=None if args.pretrained_vae_name_or_path else args.revision,
+                ),
+                safety_checker=None,
+                torch_dtype=torch.float16,
+                revision=args.revision,
+            )
+            pipeline.scheduler = DDIMScheduler.from_config(pipeline.scheduler.config)
+            if is_xformers_available():
+                pipeline.enable_xformers_memory_efficient_attention()
+            save_dir = os.path.join(args.output_dir, f"{step}")
+            pipeline.save_pretrained(save_dir)
+            with open(os.path.join(save_dir, "args.json"), "w") as f:
+                json.dump(args.__dict__, f, indent=2)
+
+            if args.save_sample_prompt is not None:
+                pipeline = pipeline.to(accelerator.device)
+                g_cuda = torch.Generator(device=accelerator.device).manual_seed(args.seed)
+                pipeline.set_progress_bar_config(disable=True)
+                sample_dir = os.path.join(save_dir, "samples")
+                os.makedirs(sample_dir, exist_ok=True)
+                with torch.autocast("cuda"), torch.inference_mode():
+                    for i in tqdm(range(args.n_save_sample), desc="Generating samples"):
+                        images = pipeline(
+                            args.save_sample_prompt,
+                            negative_prompt=args.save_sample_negative_prompt,
+                            guidance_scale=args.save_guidance_scale,
+                            num_inference_steps=args.save_infer_steps,
+                            generator=g_cuda
+                        ).images
+                        images[0].save(os.path.join(sample_dir, f"{i}.png"))
+                del pipeline
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            print(f"[*] Weights saved at {save_dir}")
 
     # Potentially load in the weights and states from a previous save
     if args.resume_from_checkpoint:
@@ -1096,6 +1165,8 @@ def main(args):
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(global_step, args.max_train_steps), disable=not accelerator.is_local_main_process)
     progress_bar.set_description("Steps")
+    global_step = 0
+    loss_avg = AverageMeter()
 
     for epoch in range(first_epoch, args.num_train_epochs):
         unet.train()
@@ -1186,51 +1257,27 @@ def main(args):
                     loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
                 accelerator.backward(loss)
-                if accelerator.sync_gradients:
-                    params_to_clip = (
-                        itertools.chain(unet_lora_parameters, text_lora_parameters_one, text_lora_parameters_two)
-                        if args.train_text_encoder
-                        else unet_lora_parameters
-                    )
-                    accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+                # if accelerator.sync_gradients:
+                #     params_to_clip = (
+                #         itertools.chain(unet_lora_parameters, text_lora_parameters_one, text_lora_parameters_two)
+                #         if args.train_text_encoder
+                #         else unet_lora_parameters
+                #     )
+                #     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
 
-            # Checks if the accelerator has performed an optimization step behind the scenes
-            if accelerator.sync_gradients:
-                progress_bar.update(1)
-                global_step += 1
+            if not global_step % args.log_interval:
+                logs = {"loss": loss_avg.avg.item(), "lr": lr_scheduler.get_last_lr()[0]}
+                progress_bar.set_postfix(**logs)
+                accelerator.log(logs, step=global_step)
 
-                if accelerator.is_main_process:
-                    if global_step % args.checkpointing_steps == 0:
-                        # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
-                        if args.checkpoints_total_limit is not None:
-                            checkpoints = os.listdir(args.output_dir)
-                            checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
-                            checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
+            if global_step > 0 and not global_step % args.save_interval and global_step >= args.save_min_steps:
+                save_weights(global_step)
 
-                            # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
-                            if len(checkpoints) >= args.checkpoints_total_limit:
-                                num_to_remove = len(checkpoints) - args.checkpoints_total_limit + 1
-                                removing_checkpoints = checkpoints[0:num_to_remove]
-
-                                logger.info(
-                                    f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
-                                )
-                                logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
-
-                                for removing_checkpoint in removing_checkpoints:
-                                    removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
-                                    shutil.rmtree(removing_checkpoint)
-
-                        save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-                        accelerator.save_state(save_path)
-                        logger.info(f"Saved state to {save_path}")
-
-            logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
-            progress_bar.set_postfix(**logs)
-            accelerator.log(logs, step=global_step)
+            progress_bar.update(1)
+            global_step += 1
 
             if global_step >= args.max_train_steps:
                 break
@@ -1395,6 +1442,7 @@ def main(args):
                 commit_message="End of training",
                 ignore_patterns=["step_*", "epoch_*"],
             )
+    save_weights(global_step)
 
     accelerator.end_training()
 
