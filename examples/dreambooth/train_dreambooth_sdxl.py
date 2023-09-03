@@ -712,19 +712,19 @@ def main(args):
 
                 sample_dataloader = accelerator.prepare(sample_dataloader)
 
-                with torch.autocast("cuda"), torch.inference_mode():
-                    for example in tqdm(
-                        sample_dataloader, desc="Generating class images", disable=not accelerator.is_local_main_process
-                    ):
-                        images = pipeline(
-                            example["prompt"],
-                            num_inference_steps=args.save_infer_steps
-                            ).images
+                # with torch.autocast("cuda"), torch.inference_mode():
+                for example in tqdm(
+                    sample_dataloader, desc="Generating class images", disable=not accelerator.is_local_main_process
+                ):
+                    images = pipeline(
+                        example["prompt"],
+                        num_inference_steps=args.save_infer_steps
+                        ).images
 
-                        for i, image in enumerate(images):
-                            hash_image = hashlib.sha1(image.tobytes()).hexdigest()
-                            image_filename = class_images_dir / f"{example['index'][i] + cur_class_images}-{hash_image}.jpg"
-                            image.save(image_filename)
+                    for i, image in enumerate(images):
+                        hash_image = hashlib.sha1(image.tobytes()).hexdigest()
+                        image_filename = class_images_dir / f"{example['index'][i] + cur_class_images}-{hash_image}.jpg"
+                        image.save(image_filename)
             del pipeline
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
