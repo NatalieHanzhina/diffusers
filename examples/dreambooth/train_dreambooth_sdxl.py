@@ -725,9 +725,9 @@ def main(args):
                         hash_image = hashlib.sha1(image.tobytes()).hexdigest()
                         image_filename = class_images_dir / f"{example['index'][i] + cur_class_images}-{hash_image}.jpg"
                         image.save(image_filename)
-            del pipeline
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+        del pipeline
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     # Handle the repository creation
     if accelerator.is_main_process:
