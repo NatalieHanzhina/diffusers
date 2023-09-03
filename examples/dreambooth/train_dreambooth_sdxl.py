@@ -1050,7 +1050,6 @@ def main(args):
     train_dataset = DreamBoothDataset(
         tokenizer=tokenizer_one,
         concepts_list=args.concepts_list,        
-        instance_data_root=args.instance_data_dir,
         with_prior_preservation=args.with_prior_preservation,
         class_data_root=args.class_data_dir if args.with_prior_preservation else None,
         num_class_images=args.num_class_images,
