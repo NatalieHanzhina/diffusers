@@ -1253,7 +1253,7 @@ def main(args):
                         text_encoders=[text_encoder_one, text_encoder_two],
                         tokenizers=None,
                         prompt=None,
-                        text_input_ids_list=[batch[0][1], batch[0][1]],
+                        text_input_ids_list=[batch["input_ids"], batch["input_ids"]],
                     )
                     unet_added_conditions.update({"text_embeds": pooled_prompt_embeds.repeat(elems_to_repeat, 1)})
                     
