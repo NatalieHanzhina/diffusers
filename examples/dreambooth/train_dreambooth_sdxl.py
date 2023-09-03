@@ -1051,7 +1051,6 @@ def main(args):
         tokenizer=tokenizer_one,
         concepts_list=args.concepts_list,        
         with_prior_preservation=args.with_prior_preservation,
-        class_data_root=args.class_data_dir if args.with_prior_preservation else None,
         num_class_images=args.num_class_images,
         size=args.resolution,
         center_crop=args.center_crop,
