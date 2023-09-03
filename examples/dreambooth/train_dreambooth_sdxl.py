@@ -689,9 +689,9 @@ def main(args):
                     pipeline = StableDiffusionXLPipeline.from_pretrained(
                         args.pretrained_model_name_or_path,
                         vae=AutoencoderKL.from_pretrained(
-                            args.pretrained_vae_model_or_path or args.pretrained_model_name_or_path,
-                            subfolder=None if args.pretrained_vae_model_or_path else "vae",
-                            revision=None if args.pretrained_vae_model_or_path else args.revision,
+                            args.pretrained_vae_model_name_or_path or args.pretrained_model_name_or_path,
+                            subfolder=None if args.pretrained_vae_model_name_or_path else "vae",
+                            revision=None if args.pretrained_vae_model_name_or_path else args.revision,
                             torch_dtype=torch_dtype
                         ),
                         torch_dtype=torch_dtype,
