@@ -467,6 +467,7 @@ def main(args):
             class_images_dir.mkdir(parents=True, exist_ok=True)
             cur_class_images = len(list(class_images_dir.iterdir()))
 
+
             if cur_class_images < args.num_class_images:
                 torch_dtype = torch.float16 if accelerator.device.type == "cuda" else torch.float32
                 if pipeline is None:
