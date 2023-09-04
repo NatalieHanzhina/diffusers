@@ -417,7 +417,7 @@ def parse_args(input_args=None):
         help=("The dimension of the LoRA update matrices."),
     )
     parser.add_argument("--log_interval", type=int, default=10, help="Log every N steps.")
-    parser.add_argument("--save_interval", type=int, default=10_000, help="Save weights every N steps.")
+    parser.add_argument("--save_interval", type=int, default=10000, help="Save weights every N steps.")
     parser.add_argument("--save_min_steps", type=int, default=0, help="Start saving weights after N steps.")
     parser.add_argument(
         "--save_infer_steps",
@@ -1120,7 +1120,7 @@ def main(args):
         # Create the pipeline using using the trained modules and save it.
         if accelerator.is_main_process:
             if args.train_text_encoder:
-                text_enc_model = accelerator.unwrap_model(text_encoder, keep_fp32_wrapper=True)
+                text_enc_model = accelerator.unwrap_model(text_encoder_one, keep_fp32_wrapper=True)
             else:
                 text_enc_model = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision)
             pipeline = StableDiffusionXLPipeline.from_pretrained(
@@ -1300,7 +1300,8 @@ def main(args):
                 #     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
+                loss_avg.update(loss.detach_(), bsz)
 
             if not global_step % args.log_interval:
                 logs = {"loss": loss_avg.avg, "lr": lr_scheduler.get_last_lr()[0]}
