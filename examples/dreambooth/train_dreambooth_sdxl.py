@@ -1303,11 +1303,10 @@ def main(args):
                 optimizer.zero_grad(set_to_none=True)
                 loss_avg.update(loss.detach_(), bsz)
 
-            if not global_step % args.log_interval:
-                logs = {"loss": loss_avg.avg, "lr": lr_scheduler.get_last_lr()[0]}
-                progress_bar.set_postfix(**logs)
-                accelerator.log(logs, step=global_step)
-
+            logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+            progress_bar.set_postfix(**logs)
+            accelerator.log(logs, step=global_step)
+            
             if global_step > 0 and not global_step % args.save_interval and global_step >= args.save_min_steps:
                 save_weights(global_step)
 
