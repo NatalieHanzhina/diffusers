@@ -559,7 +559,7 @@ def collate_fn(examples, tokenizer, with_prior_preservation=False):
     # Concat class and instance examples for prior preservation.
     # We do this to avoid doing two forward passes.
     if with_prior_preservation:
-        input_ids += [example["class_prompt_ids"] for example in examples]
+        input_ids = torch.cat([input_ids, [example["class_prompt_ids"] for example in examples]], dim=0)
         pixel_values += [example["class_images"] for example in examples]
 
     pixel_values = torch.stack(pixel_values)
@@ -732,12 +732,12 @@ def main(args):
                 if pipeline is None:
                     pipeline = StableDiffusionXLPipeline.from_pretrained(
                         args.pretrained_model_name_or_path,
-                        vae=AutoencoderKL.from_pretrained(
-                            args.pretrained_vae_model_name_or_path or args.pretrained_model_name_or_path,
-                            subfolder=None if args.pretrained_vae_model_name_or_path else "vae",
-                            revision=None if args.pretrained_vae_model_name_or_path else args.revision,
-                            torch_dtype=torch_dtype
-                        ),
+                        # vae=AutoencoderKL.from_pretrained(
+                        #     args.pretrained_vae_model_name_or_path or args.pretrained_model_name_or_path,
+                        #     subfolder=None if args.pretrained_vae_model_name_or_path else "vae",
+                        #     revision=None if args.pretrained_vae_model_name_or_path else args.revision,
+                        #     torch_dtype=torch_dtype
+                        # ),
                         torch_dtype=torch_dtype,
                         safety_checker=None,
                         revision=args.revision
@@ -1138,12 +1138,16 @@ def main(args):
         if accelerator.is_main_process:
             if args.train_text_encoder:
                 text_enc_model = accelerator.unwrap_model(text_encoder_one, keep_fp32_wrapper=True)
+                text_enc_model_2 = accelerator.unwrap_model(text_encoder_two, keep_fp32_wrapper=True)
             else:
                 text_enc_model = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision)
+                text_enc_model_2 = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision)
+
             pipeline = StableDiffusionXLPipeline.from_pretrained(
                 args.pretrained_model_name_or_path,
                 unet=accelerator.unwrap_model(unet, keep_fp32_wrapper=True),
                 text_encoder=text_enc_model,
+                text_encoder_2=text_enc_model_2,                
                 vae=AutoencoderKL.from_pretrained(
                     args.pretrained_vae_model_name_or_path or args.pretrained_model_name_or_path,
                     subfolder=None if args.pretrained_vae_model_name_or_path else "vae",
@@ -1330,6 +1334,32 @@ def main(args):
             progress_bar.update(1)
             global_step += 1
 
+            if accelerator.is_main_process:
+                if global_step % args.checkpointing_steps == 0:
+                    # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
+                    if args.checkpoints_total_limit is not None:
+                        checkpoints = os.listdir(args.output_dir)
+                        checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
+                        checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
+
+                        # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
+                        if len(checkpoints) >= args.checkpoints_total_limit:
+                            num_to_remove = len(checkpoints) - args.checkpoints_total_limit + 1
+                            removing_checkpoints = checkpoints[0:num_to_remove]
+
+                            logger.info(
+                                f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
+                            )
+                            logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
+
+                            for removing_checkpoint in removing_checkpoints:
+                                removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
+                                shutil.rmtree(removing_checkpoint)
+
+                    save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                    accelerator.save_state(save_path)
+                    logger.info(f"Saved state to {save_path}")
+
             if global_step >= args.max_train_steps:
                 break
 
@@ -1406,7 +1436,7 @@ def main(args):
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         unet = accelerator.unwrap_model(unet)
-        unet = unet.to(torch.float32)
+        unet = unet.to(torch.float16)
         unet_lora_layers = unet_attn_processors_state_dict(unet)
 
         if args.train_text_encoder:
