@@ -175,7 +175,24 @@ def parse_args(input_args=None):
         default=None,
         help="The prompt used to generate sample outputs to save.",
     )    
-
+    parser.add_argument(
+        "--save_sample_negative_prompt",
+        type=str,
+        default=None,
+        help="The negative prompt used to generate sample outputs to save.",
+    )
+    parser.add_argument(
+        "--n_save_sample",
+        type=int,
+        default=4,
+        help="The number of samples to save.",
+    )
+    parser.add_argument(
+        "--save_guidance_scale",
+        type=float,
+        default=7.5,
+        help="CFG for save sample.",
+    )
     parser.add_argument(
         "--validation_prompt",
         type=str,
