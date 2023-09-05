@@ -508,7 +508,7 @@ class DreamBoothDataset(Dataset):
         self.image_transforms = transforms.Compose(
             [
                 transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR),
-                transforms.CenterCrop(size) if center_crop else transforms.RandomCrop(size),
+                # transforms.CenterCrop(size) if center_crop else transforms.RandomCrop(size),
                 transforms.ToTensor(),
                 transforms.Normalize([0.5], [0.5]),
             ]
@@ -559,7 +559,7 @@ def collate_fn(examples, tokenizer, with_prior_preservation=False):
     # Concat class and instance examples for prior preservation.
     # We do this to avoid doing two forward passes.
     if with_prior_preservation:
-        input_ids = torch.cat([input_ids, [example["class_prompt_ids"] for example in examples]], dim=0)
+        input_ids += [example["class_prompt_ids"] for example in examples]
         pixel_values += [example["class_images"] for example in examples]
 
     pixel_values = torch.stack(pixel_values)
@@ -646,7 +646,9 @@ def unet_attn_processors_state_dict(unet) -> Dict[str, torch.tensor]:
     attn_processors_state_dict = {}
 
     for attn_processor_key, attn_processor in attn_processors.items():
+        # print(attn_processor)
         for parameter_key, parameter in attn_processor.state_dict().items():
+        # for parameter_key, parameter in attn_processor.items():
             attn_processors_state_dict[f"{attn_processor_key}.{parameter_key}"] = parameter
 
     return attn_processors_state_dict
@@ -732,12 +734,12 @@ def main(args):
                 if pipeline is None:
                     pipeline = StableDiffusionXLPipeline.from_pretrained(
                         args.pretrained_model_name_or_path,
-                        # vae=AutoencoderKL.from_pretrained(
-                        #     args.pretrained_vae_model_name_or_path or args.pretrained_model_name_or_path,
-                        #     subfolder=None if args.pretrained_vae_model_name_or_path else "vae",
-                        #     revision=None if args.pretrained_vae_model_name_or_path else args.revision,
-                        #     torch_dtype=torch_dtype
-                        # ),
+                        vae=AutoencoderKL.from_pretrained(
+                            args.pretrained_vae_model_name_or_path or args.pretrained_model_name_or_path,
+                            subfolder=None if args.pretrained_vae_model_name_or_path else "vae",
+                            revision=None if args.pretrained_vae_model_name_or_path else args.revision,
+                            torch_dtype=torch_dtype
+                        ),
                         torch_dtype=torch_dtype,
                         safety_checker=None,
                         revision=args.revision
@@ -839,8 +841,8 @@ def main(args):
     # The VAE is always in float32 to avoid NaN losses.
     vae.to(accelerator.device, dtype=torch.float32)
 
-    text_encoder_one.to(accelerator.device, dtype=weight_dtype)
-    text_encoder_two.to(accelerator.device, dtype=weight_dtype)
+    text_encoder_one.to(accelerator.device, dtype=torch.float32)
+    text_encoder_two.to(accelerator.device, dtype=torch.float32)
 
     if args.enable_xformers_memory_efficient_attention:
         if is_xformers_available():
@@ -1154,7 +1156,7 @@ def main(args):
                     revision=None if args.pretrained_vae_model_name_or_path else args.revision,
                 ),
                 safety_checker=None,
-                torch_dtype=torch.float16,
+                torch_dtype=weight_dtype,
                 revision=args.revision,
             )
             pipeline.scheduler = DDIMScheduler.from_config(pipeline.scheduler.config)
@@ -1312,16 +1314,17 @@ def main(args):
                     loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
                 accelerator.backward(loss)
-                # if accelerator.sync_gradients:
-                #     params_to_clip = (
-                #         itertools.chain(unet_lora_parameters, text_lora_parameters_one, text_lora_parameters_two)
-                #         if args.train_text_encoder
-                #         else unet_lora_parameters
-                #     )
-                #     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+                if accelerator.sync_gradients:
+                    params_to_clip = (
+                        itertools.chain(unet_lora_parameters, text_lora_parameters_one, text_lora_parameters_two)
+                        if args.train_text_encoder
+                        else unet_lora_parameters
+                    )
+                    accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
-                optimizer.zero_grad(set_to_none=True)
+                # optimizer.zero_grad(set_to_none=True)
+                optimizer.zero_grad()
                 loss_avg.update(loss.detach_(), bsz)
 
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
@@ -1356,7 +1359,7 @@ def main(args):
                                 removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
                                 shutil.rmtree(removing_checkpoint)
 
-                    save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                    save_path = os.path.join(args.output_dir, f"{global_step}")
                     accelerator.save_state(save_path)
                     logger.info(f"Saved state to {save_path}")
 
@@ -1430,98 +1433,98 @@ def main(args):
                         )
                 del pipeline
                 torch.cuda.empty_cache() 
-        if global_step > 0 and not global_step % args.save_interval and global_step >= args.save_min_steps:
-            # Save the lora layers
-            accelerator.wait_for_everyone()
-            if accelerator.is_main_process:
-                unet = accelerator.unwrap_model(unet)
-                unet = unet.to(torch.float16)
-                unet_lora_layers = unet_attn_processors_state_dict(unet)
+        # if global_step > 0 and not global_step % args.save_interval and global_step >= args.save_min_steps:
+    # Save the lora layers
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        unet = accelerator.unwrap_model(unet)
+        unet = unet.to(weight_dtype)
+        unet_lora_layers = unet_attn_processors_state_dict(unet)
 
-                if args.train_text_encoder:
-                    text_encoder_one = accelerator.unwrap_model(text_encoder_one)
-                    text_encoder_lora_layers = text_encoder_lora_state_dict(text_encoder_one.to(torch.float32))
-                    text_encoder_two = accelerator.unwrap_model(text_encoder_two)
-                    text_encoder_2_lora_layers = text_encoder_lora_state_dict(text_encoder_two.to(torch.float32))
-                else:
-                    text_encoder_lora_layers = None
-                    text_encoder_2_lora_layers = None
+        if args.train_text_encoder:
+            text_encoder_one = accelerator.unwrap_model(text_encoder_one)
+            text_encoder_lora_layers = text_encoder_lora_state_dict(text_encoder_one.to(torch.float32))
+            text_encoder_two = accelerator.unwrap_model(text_encoder_two)
+            text_encoder_2_lora_layers = text_encoder_lora_state_dict(text_encoder_two.to(torch.float32))
+        else:
+            text_encoder_lora_layers = None
+            text_encoder_2_lora_layers = None
 
-                StableDiffusionXLPipeline.save_lora_weights(
-                    save_directory=args.output_dir,
-                    unet_lora_layers=unet_lora_layers,
-                    text_encoder_lora_layers=text_encoder_lora_layers,
-                    text_encoder_2_lora_layers=text_encoder_2_lora_layers,
-                )
+        StableDiffusionXLPipeline.save_lora_weights(
+            save_directory=args.output_dir,
+            unet_lora_layers=unet_lora_layers,
+            text_encoder_lora_layers=text_encoder_lora_layers,
+            text_encoder_2_lora_layers=text_encoder_2_lora_layers,
+        )
 
-                # Final inference
-                # Load previous pipeline
-                vae = AutoencoderKL.from_pretrained(
-                    vae_path,
-                    subfolder="vae" if args.pretrained_vae_model_name_or_path is None else None,
-                    revision=args.revision,
-                    torch_dtype=weight_dtype,
-                )
-                pipeline = StableDiffusionXLPipeline.from_pretrained(
-                    args.pretrained_model_name_or_path, vae=vae, revision=args.revision, torch_dtype=weight_dtype
-                )
+        # Final inference
+        # Load previous pipeline
+        vae = AutoencoderKL.from_pretrained(
+            vae_path,
+            subfolder="vae" if args.pretrained_vae_model_name_or_path is None else None,
+            revision=args.revision,
+            torch_dtype=weight_dtype,
+        )
+        pipeline = StableDiffusionXLPipeline.from_pretrained(
+            args.pretrained_model_name_or_path, vae=vae, revision=args.revision, torch_dtype=weight_dtype
+        )
 
-                # We train on the simplified learning objective. If we were previously predicting a variance, we need the scheduler to ignore it
-                scheduler_args = {}
+        # We train on the simplified learning objective. If we were previously predicting a variance, we need the scheduler to ignore it
+        scheduler_args = {}
 
-                if "variance_type" in pipeline.scheduler.config:
-                    variance_type = pipeline.scheduler.config.variance_type
+        if "variance_type" in pipeline.scheduler.config:
+            variance_type = pipeline.scheduler.config.variance_type
 
-                    if variance_type in ["learned", "learned_range"]:
-                        variance_type = "fixed_small"
+            if variance_type in ["learned", "learned_range"]:
+                variance_type = "fixed_small"
 
-                    scheduler_args["variance_type"] = variance_type
+            scheduler_args["variance_type"] = variance_type
 
-                pipeline.scheduler = DPMSolverMultistepScheduler.from_config(pipeline.scheduler.config, **scheduler_args)
+        pipeline.scheduler = DPMSolverMultistepScheduler.from_config(pipeline.scheduler.config, **scheduler_args)
 
-                # load attention processors
-                pipeline.load_lora_weights(args.output_dir)
+        # load attention processors
+        pipeline.load_lora_weights(args.output_dir)
 
-                # run inference
-                images = []
-                if args.validation_prompt and args.num_validation_images > 0:
-                    pipeline = pipeline.to(accelerator.device)
-                    generator = torch.Generator(device=accelerator.device).manual_seed(args.seed) if args.seed else None
-                    images = [
-                        pipeline(args.validation_prompt, num_inference_steps=25, generator=generator).images[0]
-                        for _ in range(args.num_validation_images)
-                    ]
+        # run inference
+        images = []
+        if args.validation_prompt and args.num_validation_images > 0:
+            pipeline = pipeline.to(accelerator.device)
+            generator = torch.Generator(device=accelerator.device).manual_seed(args.seed) if args.seed else None
+            images = [
+                pipeline(args.validation_prompt, num_inference_steps=25, generator=generator).images[0]
+                for _ in range(args.num_validation_images)
+            ]
 
-                    for tracker in accelerator.trackers:
-                        if tracker.name == "tensorboard":
-                            np_images = np.stack([np.asarray(img) for img in images])
-                            tracker.writer.add_images("test", np_images, epoch, dataformats="NHWC")
-                        if tracker.name == "wandb":
-                            tracker.log(
-                                {
-                                    "test": [
-                                        wandb.Image(image, caption=f"{i}: {args.validation_prompt}")
-                                        for i, image in enumerate(images)
-                                    ]
-                                }
-                            )
-    
-                if args.push_to_hub:
-                    save_model_card(
-                        repo_id,
-                        images=images,
-                        base_model=args.pretrained_model_name_or_path,
-                        train_text_encoder=args.train_text_encoder,
-                        prompt=args.instance_prompt,
-                        repo_folder=args.output_dir,
-                        vae_path=args.pretrained_vae_model_name_or_path,
+            for tracker in accelerator.trackers:
+                if tracker.name == "tensorboard":
+                    np_images = np.stack([np.asarray(img) for img in images])
+                    tracker.writer.add_images("test", np_images, epoch, dataformats="NHWC")
+                if tracker.name == "wandb":
+                    tracker.log(
+                        {
+                            "test": [
+                                wandb.Image(image, caption=f"{i}: {args.validation_prompt}")
+                                for i, image in enumerate(images)
+                            ]
+                        }
                     )
-                    upload_folder(
-                        repo_id=repo_id,
-                        folder_path=args.output_dir,
-                        commit_message="End of training",
-                        ignore_patterns=["step_*", "epoch_*"],
-                    )
+
+        if args.push_to_hub:
+            save_model_card(
+                repo_id,
+                images=images,
+                base_model=args.pretrained_model_name_or_path,
+                train_text_encoder=args.train_text_encoder,
+                prompt=args.instance_prompt,
+                repo_folder=args.output_dir,
+                vae_path=args.pretrained_vae_model_name_or_path,
+            )
+            upload_folder(
+                repo_id=repo_id,
+                folder_path=args.output_dir,
+                commit_message="End of training",
+                ignore_patterns=["step_*", "epoch_*"],
+            )
       
     save_weights(global_step)
 
