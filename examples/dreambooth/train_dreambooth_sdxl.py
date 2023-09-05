@@ -1323,8 +1323,8 @@ def main(args):
                     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
-                # optimizer.zero_grad(set_to_none=True)
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
+                # optimizer.zero_grad()
                 loss_avg.update(loss.detach_(), bsz)
 
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
@@ -1385,7 +1385,7 @@ def main(args):
                     vae=vae,
                     text_encoder=accelerator.unwrap_model(text_encoder_one),
                     text_encoder_2=accelerator.unwrap_model(text_encoder_two),
-                    unet=accelerator.unwrap_model(unet),
+                    unet=accelerator.unwrap_model(unet, keep_fp32_wrapper=True),
                     revision=args.revision,
                     torch_dtype=weight_dtype,
                 )
@@ -1411,12 +1411,16 @@ def main(args):
                 # run inference
                 generator = torch.Generator(device=accelerator.device).manual_seed(args.seed) if args.seed else None
                 pipeline_args = {"prompt": args.validation_prompt}
+                save_dir = os.path.join(args.output_dir, f"{global_step}")
+                sample_dir = os.path.join(save_dir, "samples")
+                os.makedirs(sample_dir, exist_ok=True)
 
                 with torch.cuda.amp.autocast():
                     images = [
                         pipeline(**pipeline_args, generator=generator).images[0]
                         for _ in range(args.num_validation_images)
                     ]
+                    images.save(os.path.join(sample_dir, f"{i}.png"))                  
 
                 for tracker in accelerator.trackers:
                     if tracker.name == "tensorboard":
