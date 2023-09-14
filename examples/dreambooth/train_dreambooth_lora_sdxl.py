@@ -1272,7 +1272,7 @@ def main(args):
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         unet = accelerator.unwrap_model(unet)
-        unet = unet.to(torch.float32)
+        unet = unet.to(weight_dtype)
         unet_lora_layers = unet_attn_processors_state_dict(unet)
 
         if args.train_text_encoder:
